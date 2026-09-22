@@ -1,0 +1,74 @@
+name: Gemma 4 12B Scheduled Task
+
+on:
+  schedule:
+    # يتم التنفيذ تلقائياً كل 4 ساعات بفضل الله
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # يتيح لك التشغيل اليدوي متى شئت من واجهة غيت هاب
+
+jobs:
+  run-gemma-task:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Free Up Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          # تثبيت المكتبات الأساسية المطلوبة للتشغيل[span_3](start_span)[span_3](end_span)
+          pip install -U transformers torch accelerate
+
+      - name: Run Gemma Inference Script
+        env:
+          # إذا كان الموديل يتطلب Hugging Face Token (ضع الـ Token في أسرار الريبو باسم HF_TOKEN)
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c '
+          from transformers import AutoProcessor, AutoModelForMultimodalLM
+          
+          MODEL_ID = "google/gemma-4-12B-it"
+          
+          print("--- بفضل الله: جارٍ تحميل المعالج والموديل ---")
+          processor = AutoProcessor.from_pretrained(MODEL_ID)
+          model = AutoModelForMultimodalLM.from_pretrained(
+              MODEL_ID,
+              dtype="auto",
+              device_map="auto"
+          )
+          
+          # تجربة إرسال برومبت بسيط للتأكد من العمل
+          messages = [
+              {"role": "system", "content": "You are a helpful assistant."},
+              {"role": "user", "content": "Write a short confirmation that the GitHub Actions runner is working."},
+          ]
+          
+          inputs = processor.apply_chat_template(
+              messages,
+              tokenize=True,
+              return_dict=True,
+              return_tensors="pt",
+              add_generation_prompt=True,
+              enable_thinking=False
+          ).to(model.device)
+          
+          input_len = inputs["input_ids"].shape[-1]
+          outputs = model.generate(**inputs, max_new_tokens=128)
+          response = processor.decode(outputs[0][input_len:], skip_special_tokens=False)
+          
+          print("--- النتيجة بنجاح بفضل الله ---")
+          print(response)
+          '
