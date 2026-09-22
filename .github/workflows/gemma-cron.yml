@@ -29,8 +29,8 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          # تثبيت المكتبات الأساسية المطلوبة للتشغيل[span_3](start_span)[span_3](end_span)
-          pip install -U transformers torch accelerate
+          # أضفنا كلمة pillow هنا بفضل الله
+          pip install -U transformers torch accelerate pillow
 
       - name: Run Gemma Inference Script
         env:
