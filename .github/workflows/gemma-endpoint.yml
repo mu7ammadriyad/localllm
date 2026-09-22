@@ -1,0 +1,58 @@
+name: Gemma 4 OpenAI Endpoint Runner
+
+on:
+  workflow_dispatch: # يتم تشغيل الـ Endpoint يدوياً عند الحاجة
+
+jobs:
+  run-gemma-endpoint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache Hugging Face Model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-gemma-4-12b-Q4_K_M
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          # تثبيت حزمة السيرفر المتوافقة مع OpenAI
+          pip install "llama-cpp-python[server]" huggingface-hub
+
+      - name: Install Cloudflare Tunnel
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Start Gemma 4 OpenAI Server & Cloudflare Tunnel
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          MODEL_PATH=$(python -c '
+          import os
+          from huggingface_hub import hf_hub_download
+          hf_token = os.environ.get("HF_TOKEN", "").strip() or None
+          print(hf_hub_download(repo_id="unsloth/gemma-4-12b-it-GGUF", filename="gemma-4-12b-it-Q4_K_M.gguf", token=hf_token))
+          ')
+
+          print("--- بفضل الله: جارٍ تشغيل سيرفر llama.cpp على البورت 8000 ---")
+          python -m llama_cpp.server --model "$MODEL_PATH" --host 0.0.0.0 --port 8000 --n_ctx 2048 --n_threads 2 &
+
+          # انتظار ثوانٍ لضمان اكتمال تحضير السيرفر في الخلفية
+          sleep 12
+
+          echo "=========================================================="
+          echo "--- بفضل الله: جارٍ إنشاء رابط Endpoint عالمي لـ Gemma 4 ---"
+          echo "=========================================================="
+
+          # تشغيل التانل وعرض الرابط في اللوج مباشرة
+          cloudflared tunnel --url http://localhost:8000
