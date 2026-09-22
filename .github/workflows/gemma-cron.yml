@@ -1,13 +1,12 @@
-name: Gemma 4 12B Scheduled Task
+name: Gemma 4 GGUF Runner
 
 on:
   schedule:
-    # يتم التنفيذ تلقائياً كل 4 ساعات بفضل الله
     - cron: '0 */4 * * *'
-  workflow_dispatch: # يتيح لك التشغيل اليدوي متى شئت من واجهة غيت هاب
+  workflow_dispatch:
 
 jobs:
-  run-gemma-task:
+  run-gemma-gguf:
     runs-on: ubuntu-latest
     
     steps:
@@ -18,57 +17,51 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
-
-      - name: Free Up Disk Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
 
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          # أضفنا كلمة pillow هنا بفضل الله
-          pip install -U transformers torch accelerate pillow
+          # تثبيت مكتبة llama-cpp-python وأداة التنزيل فقط بدون PyTorch
+          pip install llama-cpp-python huggingface-hub
 
-      - name: Run Gemma Inference Script
+      - name: Run Gemma 4 with llama.cpp
         env:
-          # إذا كان الموديل يتطلب Hugging Face Token (ضع الـ Token في أسرار الريبو باسم HF_TOKEN)
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -c '
-          from transformers import AutoProcessor, AutoModelForMultimodalLM
-          
-          MODEL_ID = "google/gemma-4-12B-it"
-          
-          print("--- بفضل الله: جارٍ تحميل المعالج والموديل ---")
-          processor = AutoProcessor.from_pretrained(MODEL_ID)
-          model = AutoModelForMultimodalLM.from_pretrained(
-              MODEL_ID,
-              dtype="auto",
-              device_map="auto"
+          import os
+          from huggingface_hub import hf_hub_download
+          from llama_cpp import Llama
+
+          REPO_ID = "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+          # يمكنك تحديد اسم الملف دقيقاً حسب الحجم المطلوب من الريبو (مثل Q4_K_M أو Q4_0)
+          FILENAME = "gemma-4-26B-A4B-it-Q4_K_M.gguf"
+
+          print("--- بفضل الله: جارٍ تحميل ملف GGUF ---")
+          model_path = hf_hub_download(
+              repo_id=REPO_ID,
+              filename=FILENAME,
+              token=os.environ.get("HF_TOKEN")
           )
-          
-          # تجربة إرسال برومبت بسيط للتأكد من العمل
-          messages = [
-              {"role": "system", "content": "You are a helpful assistant."},
-              {"role": "user", "content": "Write a short confirmation that the GitHub Actions runner is working."},
-          ]
-          
-          inputs = processor.apply_chat_template(
-              messages,
-              tokenize=True,
-              return_dict=True,
-              return_tensors="pt",
-              add_generation_prompt=True,
-              enable_thinking=False
-          ).to(model.device)
-          
-          input_len = inputs["input_ids"].shape[-1]
-          outputs = model.generate(**inputs, max_new_tokens=128)
-          response = processor.decode(outputs[0][input_len:], skip_special_tokens=False)
-          
-          print("--- النتيجة بنجاح بفضل الله ---")
-          print(response)
+
+          print("--- بفضل الله: تهيئة محرك llama.cpp ---")
+          llm = Llama(
+              model_path=model_path,
+              n_ctx=2048,      # سياق المحادثة
+              n_threads=2,     # عدد أنوية المعالج المتاحة في Runner
+              verbose=False
+          )
+
+          print("--- إرسال الطلب للموديل ---")
+          response = llm.create_chat_completion(
+              messages=[
+                  {"role": "system", "content": "You are a helpful assistant."},
+                  {"role": "user", "content": "Confirm that llama.cpp execution is working properly."}
+              ],
+              max_tokens=128,
+              temperature=0.7
+          )
+
+          print("--- النتيجة بفضل الله ---")
+          print(response["choices"][0]["message"]["content"])
           '
