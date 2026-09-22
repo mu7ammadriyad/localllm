@@ -18,10 +18,15 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Cache Hugging Face Model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-gemma-4-12b-Q4_K_M
+
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          # تثبيت مكتبة llama-cpp-python وأداة التنزيل فقط بدون PyTorch
           pip install llama-cpp-python huggingface-hub
 
       - name: Run Gemma 4 with llama.cpp
@@ -33,9 +38,8 @@ jobs:
           from huggingface_hub import hf_hub_download
           from llama_cpp import Llama
 
-          REPO_ID = "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
-          # يمكنك تحديد اسم الملف دقيقاً حسب الحجم المطلوب من الريبو (مثل Q4_K_M أو Q4_0)
-          FILENAME = "gemma-4-26B-A4B-it-Q4_K_M.gguf"
+          REPO_ID = "unsloth/gemma-4-12b-it-GGUF"
+          FILENAME = "gemma-4-12b-it-Q4_K_M.gguf"
 
           print("--- بفضل الله: جارٍ تحميل ملف GGUF ---")
           model_path = hf_hub_download(
@@ -47,8 +51,8 @@ jobs:
           print("--- بفضل الله: تهيئة محرك llama.cpp ---")
           llm = Llama(
               model_path=model_path,
-              n_ctx=2048,      # سياق المحادثة
-              n_threads=2,     # عدد أنوية المعالج المتاحة في Runner
+              n_ctx=2048,
+              n_threads=2,
               verbose=False
           )
 
