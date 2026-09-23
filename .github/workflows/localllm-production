@@ -1,0 +1,219 @@
+name: localllm-production
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-localllm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Install llama
+        run: |
+          curl -LsSf https://llama.app/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install cloudflared
+        run: |
+          curl -L --fail -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: Start llama server
+        shell: bash
+        env:
+          LLAMA_API_KEY: ${{ secrets.LLAMA_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+
+          if [ -z "$LLAMA_API_KEY" ]; then
+            echo "❌ LLAMA_API_KEY secret is missing"
+            exit 1
+          fi
+
+          THREADS=$(nproc)
+
+          nohup llama serve \
+            -hf "unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL" \
+            --host 0.0.0.0 \
+            --port 8080 \
+            --alias "gemma-4-E2B" \
+            --threads "$THREADS" \
+            --threads-batch "$THREADS" \
+            --parallel 2 \
+            --kv-unified-per-slot 8192 \
+            --cont-batching \
+            --flash-attn auto \
+            --api-key "$LLAMA_API_KEY" \
+            > llama.log 2>&1 &
+
+          PID=$!
+          echo "$PID" > llama.pid
+
+          echo "CPU threads: $THREADS"
+          echo "Parallel slots: 2"
+          echo "Context per slot: 8192"
+          echo "Model: unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL"
+
+          for i in $(seq 1 120); do
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ llama stopped"
+              tail -n 200 llama.log
+              exit 1
+            fi
+
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then
+              echo "✅ llama server ready"
+              break
+            fi
+
+            sleep 5
+          done
+
+          if ! curl -sf http://127.0.0.1:8080/health >/dev/null; then
+            echo "❌ llama server not ready"
+            tail -n 200 llama.log
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Web UI: http://127.0.0.1:8080"
+          echo "✅ OpenAI API: http://127.0.0.1:8080/v1/chat/completions"
+
+      - name: Start Cloudflare Tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          nohup cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:8080 \
+            > tunnel.log 2>&1 &
+
+          TUNNEL_PID=$!
+          echo "$TUNNEL_PID" > tunnel.pid
+
+          URL=""
+
+          for i in $(seq 1 60); do
+            URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "❌ Cloudflare stopped"
+              cat tunnel.log
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          if [ -z "$URL" ]; then
+            echo "❌ Tunnel URL not found"
+            cat tunnel.log
+            exit 1
+          fi
+
+          HOST=$(echo "$URL" | sed 's#https://##')
+
+          echo "BASE_URL=$URL" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "=================================================="
+          echo "✅ WEB UI"
+          echo "$URL"
+          echo ""
+          echo "✅ OPENAI BASE URL"
+          echo "$URL/v1"
+          echo ""
+          echo "✅ CHAT COMPLETIONS"
+          echo "$URL/v1/chat/completions"
+          echo "=================================================="
+
+          echo "Waiting for DNS..."
+
+          for i in $(seq 1 30); do
+            if getent hosts "$HOST" >/dev/null 2>&1; then
+              echo "✅ DNS ready"
+              break
+            fi
+
+            echo "DNS not ready: $i/30"
+            sleep 2
+          done
+
+          if ! getent hosts "$HOST" >/dev/null 2>&1; then
+            echo "❌ DNS did not resolve"
+            exit 1
+          fi
+
+      - name: Test OpenAI endpoint
+        shell: bash
+        env:
+          LLAMA_API_KEY: ${{ secrets.LLAMA_API_KEY }}
+        run: |
+          set -Eeuo pipefail
+
+          echo "Testing /v1/chat/completions..."
+
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -sS --fail-with-body \
+              --connect-timeout 10 \
+              --max-time 120 \
+              "$BASE_URL/v1/chat/completions" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $LLAMA_API_KEY" \
+              -d '{
+                "model": "gemma-4-E2B",
+                "messages": [
+                  {
+                    "role": "user",
+                    "content": "قول كلمة واحدة فقط: مرحبا"
+                  }
+                ],
+                "stream": false,
+                "max_tokens": 32
+              }' || true)
+
+            if [ -n "$RESPONSE" ]; then
+              echo "$RESPONSE"
+              echo ""
+              echo "✅ OpenAI endpoint works"
+              break
+            fi
+
+            echo "Retry $i/10..."
+            sleep 3
+          done
+
+          if [ -z "${RESPONSE:-}" ]; then
+            echo "❌ OpenAI endpoint test failed"
+            exit 1
+          fi
+
+      - name: Keep alive
+        run: |
+          echo "=========================================="
+          echo "✅ SERVER RUNNING"
+          echo ""
+          echo "WEB UI:"
+          echo "$BASE_URL"
+          echo ""
+          echo "OPENAI BASE URL:"
+          echo "$BASE_URL/v1"
+          echo ""
+          echo "CHAT COMPLETIONS:"
+          echo "$BASE_URL/v1/chat/completions"
+          echo ""
+          echo "MODEL:"
+          echo "gemma-4-E2B"
+          echo ""
+          echo "PARALLEL REQUESTS: 2"
+          echo "API KEY: ENABLED"
+          echo "=========================================="
+
+          sleep 19800
