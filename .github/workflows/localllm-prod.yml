@@ -30,21 +30,25 @@ jobs:
             --host 0.0.0.0 \
             --port 8080 \
             --alias "gemma-4-12b" \
-            --ctx-size 16384 \
-            --parallel 1 \
             --threads "$THREADS" \
             --threads-batch "$THREADS" \
+            --parallel 2 \
+            --kv-unified-per-slot 8192 \
+            --cont-batching \
+            --flash-attn on \
             > llama.log 2>&1 &
 
           PID=$!
           echo "$PID" > llama.pid
 
-          echo "Waiting for llama server..."
+          echo "CPU threads: $THREADS"
+          echo "Parallel slots: 2"
+          echo "Context per slot: 8192"
 
           for i in $(seq 1 120); do
             if ! kill -0 "$PID" 2>/dev/null; then
               echo "❌ llama stopped"
-              tail -n 100 llama.log
+              tail -n 200 llama.log
               exit 1
             fi
 
@@ -56,14 +60,11 @@ jobs:
             sleep 5
           done
 
-          curl -sf http://127.0.0.1:8080/health >/dev/null || {
+          if ! curl -sf http://127.0.0.1:8080/health >/dev/null; then
             echo "❌ llama server not ready"
             tail -n 200 llama.log
             exit 1
-          }
-
-          echo "✅ Web UI: http://127.0.0.1:8080"
-          echo "✅ OpenAI API: http://127.0.0.1:8080/v1/chat/completions"
+          fi
 
       - name: Start Cloudflare Tunnel
         shell: bash
@@ -76,16 +77,17 @@ jobs:
           TUNNEL_PID=$!
           echo "$TUNNEL_PID" > tunnel.pid
 
+          URL=""
+
           for i in $(seq 1 60); do
             URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
 
             if [ -n "$URL" ]; then
-              echo "BASE_URL=$URL" >> "$GITHUB_ENV"
               break
             fi
 
             if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-              echo "❌ Cloudflare Tunnel stopped"
+              echo "❌ Cloudflare stopped"
               cat tunnel.log
               exit 1
             fi
@@ -93,13 +95,16 @@ jobs:
             sleep 1
           done
 
-          if [ -z "${URL:-}" ]; then
+          if [ -z "$URL" ]; then
             echo "❌ Tunnel URL not found"
             cat tunnel.log
             exit 1
           fi
 
-          echo ""
+          HOST=$(echo "$URL" | sed 's#https://##')
+
+          echo "BASE_URL=$URL" >> "$GITHUB_ENV"
+
           echo "=================================================="
           echo "✅ WEB UI"
           echo "$URL"
@@ -111,32 +116,71 @@ jobs:
           echo "$URL/v1/chat/completions"
           echo "=================================================="
 
+          echo "Waiting for DNS..."
+
+          for i in $(seq 1 30); do
+            if getent hosts "$HOST" >/dev/null 2>&1; then
+              echo "✅ DNS ready"
+              break
+            fi
+            echo "DNS not ready: $i/30"
+            sleep 2
+          done
+
+          if ! getent hosts "$HOST" >/dev/null 2>&1; then
+            echo "❌ DNS did not resolve"
+            exit 1
+          fi
+
       - name: Test OpenAI endpoint
         shell: bash
         run: |
-          echo "Testing /v1/chat/completions..."
+          echo "Testing OpenAI-compatible endpoint..."
 
-          curl -sS --fail \
-            "$BASE_URL/v1/chat/completions" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "model": "gemma-4-12b",
-              "messages": [
-                {
-                  "role": "user",
-                  "content": "قول كلمة واحدة: مرحبا"
-                }
-              ],
-              "stream": false,
-              "max_tokens": 32
-            }'
+          for i in $(seq 1 10); do
+            RESPONSE=$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 120 \
+              -H "Content-Type: application/json" \
+              -d '{
+                "model": "gemma-4-12b",
+                "messages": [
+                  {
+                    "role": "user",
+                    "content": "قول كلمة واحدة فقط: مرحبا"
+                  }
+                ],
+                "stream": false,
+                "max_tokens": 32
+              }' \
+              "$BASE_URL/v1/chat/completions" || true)
 
-          echo ""
-          echo "✅ OpenAI-compatible endpoint works"
+            if [ -n "$RESPONSE" ]; then
+              echo "$RESPONSE"
+              echo ""
+              echo "✅ OpenAI endpoint works"
+              break
+            fi
+
+            echo "Retry $i/10..."
+            sleep 3
+          done
 
       - name: Keep alive
         run: |
-          echo "✅ Web UI: $BASE_URL"
-          echo "✅ OpenAI Base URL: $BASE_URL/v1"
-          echo "✅ Endpoint: $BASE_URL/v1/chat/completions"
+          echo "=========================================="
+          echo "✅ SERVER RUNNING"
+          echo ""
+          echo "WEB UI:"
+          echo "$BASE_URL"
+          echo ""
+          echo "OPENAI BASE URL:"
+          echo "$BASE_URL/v1"
+          echo ""
+          echo "CHAT COMPLETIONS:"
+          echo "$BASE_URL/v1/chat/completions"
+          echo ""
+          echo "PARALLEL REQUESTS: 2"
+          echo "=========================================="
+
           sleep 19800
