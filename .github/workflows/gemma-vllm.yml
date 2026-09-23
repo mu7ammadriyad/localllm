@@ -1,86 +1,68 @@
-name: gemma-vllm
+name: vllm-test
 
 on:
   workflow_dispatch:
 
 jobs:
   serve:
-    runs-on: [self-hosted, linux, x64, gpu]
+    runs-on: ubuntu-latest
     timeout-minutes: 350
 
     env:
-      MODEL: unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL
-      TOKENIZER: google/gemma-4-12B-it
+      MODEL: Qwen/Qwen3-8B
       PORT: 8000
 
     steps:
-      - name: Install dependencies
+      - name: Install
         run: |
           python3 -m pip install -U pip
-          pip install -U vllm vllm-gguf-plugin
+          pip install -U vllm
           curl -L --fail -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/cloudflared
 
-      - name: Check GPU
-        run: |
-          nvidia-smi
-
       - name: Start vLLM
         run: |
+          export VLLM_CPU_NUM_OF_RESERVED_CPU=1
           nohup vllm serve "$MODEL" \
-            --tokenizer "$TOKENIZER" \
             --host 0.0.0.0 \
             --port "$PORT" \
+            --dtype bfloat16 \
             --max-model-len 8192 \
             --max-num-seqs 10 \
             --max-num-batched-tokens 8192 \
-            --max-num-queued-reqs 100 \
-            --gpu-memory-utilization 0.90 \
             > vllm.log 2>&1 &
 
           echo $! > vllm.pid
 
           for i in $(seq 1 120); do
-            if curl -sf "http://127.0.0.1:$PORT/health" > /dev/null; then
-              echo "vLLM ready"
+            if curl -sf http://127.0.0.1:$PORT/health >/dev/null; then
+              echo "vLLM READY"
               break
             fi
-
             if ! kill -0 "$(cat vllm.pid)" 2>/dev/null; then
               cat vllm.log
               exit 1
             fi
-
             sleep 5
           done
 
-          curl -sf "http://127.0.0.1:$PORT/health"
+          curl -sf http://127.0.0.1:$PORT/health
           tail -n 50 vllm.log
 
-      - name: Start Cloudflare Tunnel
+      - name: Start Tunnel
         run: |
-          nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" > tunnel.log 2>&1 &
-          echo $! > tunnel.pid
-
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:$PORT > tunnel.log 2>&1 &
           for i in $(seq 1 60); do
             URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
-
-            if [ -n "$URL" ]; then
-              echo "OPENAI_BASE_URL=$URL/v1" >> "$GITHUB_ENV"
-              echo "OPENAI_ENDPOINT=$URL/v1/chat/completions" >> "$GITHUB_ENV"
-              echo "BASE URL: $URL/v1"
-              echo "CHAT COMPLETIONS: $URL/v1/chat/completions"
-              break
-            fi
-
+            [ -n "$URL" ] && break
             sleep 1
           done
-
           test -n "${URL:-}" || { cat tunnel.log; exit 1; }
+          echo "================================"
+          echo "BASE URL: $URL/v1"
+          echo "CHAT: $URL/v1/chat/completions"
+          echo "================================"
 
-      - name: Keep server alive
-        run: |
-          echo "Base URL: $OPENAI_BASE_URL"
-          echo "Endpoint: $OPENAI_ENDPOINT"
-          sleep 19800
+      - name: Keep Alive
+        run: sleep 19800
