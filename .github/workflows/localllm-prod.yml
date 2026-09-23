@@ -1,0 +1,119 @@
+name: localllm-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-localllm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Install llama
+        run: |
+          curl -LsSf https://llama.app/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install cloudflared
+        run: |
+          curl -L --fail -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: Start llama server
+        shell: bash
+        run: |
+          MODEL="unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+
+          llama serve -hf "$MODEL" \
+            --host 0.0.0.0 \
+            --port 8080 \
+            --ctx-size 16384 \
+            --parallel 1 \
+            --no-webui \
+            > llama.log 2>&1 &
+
+          LLAMA_PID=$!
+          echo "$LLAMA_PID" > llama.pid
+
+          echo "Waiting for llama..."
+
+          for i in $(seq 1 120); do
+            if ! kill -0 "$LLAMA_PID" 2>/dev/null; then
+              echo "❌ llama stopped"
+              tail -n 100 llama.log
+              exit 1
+            fi
+
+            if curl -sf http://127.0.0.1:8080/health >/dev/null; then
+              echo "✅ llama is ready"
+              break
+            fi
+
+            sleep 5
+          done
+
+          if ! curl -sf http://127.0.0.1:8080/health >/dev/null; then
+            echo "❌ llama did not become ready"
+            tail -n 200 llama.log
+            exit 1
+          fi
+
+          echo "✅ API server: http://127.0.0.1:8080"
+
+      - name: Start Cloudflare Tunnel
+        shell: bash
+        run: |
+          cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:8080 \
+            > tunnel.log 2>&1 &
+
+          TUNNEL_PID=$!
+          echo "$TUNNEL_PID" > tunnel.pid
+
+          for i in $(seq 1 60); do
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "❌ Cloudflare stopped"
+              cat tunnel.log
+              exit 1
+            fi
+
+            URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
+
+            if [ -n "$URL" ]; then
+              echo "BASE_URL=$URL/v1" >> "$GITHUB_ENV"
+              break
+            fi
+
+            sleep 1
+          done
+
+          if [ -z "${URL:-}" ]; then
+            echo "❌ Tunnel URL not found"
+            cat tunnel.log
+            exit 1
+          fi
+
+          echo ""
+          echo "=================================================="
+          echo "✅ OPENAI BASE URL:"
+          echo "$URL/v1"
+          echo ""
+          echo "✅ CHAT COMPLETIONS:"
+          echo "$URL/v1/chat/completions"
+          echo "=================================================="
+
+      - name: Final check
+        run: |
+          curl -sf http://127.0.0.1:8080/health
+          echo ""
+          echo "✅ Server is running"
+          echo "✅ OpenAI Base URL: $BASE_URL"
+          echo "✅ Endpoint: $BASE_URL/chat/completions"
+
+      - name: Keep alive
+        run: |
+          echo "Server is running..."
+          echo "OpenAI Base URL: $BASE_URL"
+          sleep 19800
