@@ -1,4 +1,4 @@
-name: vllm-test
+name: gemma-vllm
 
 on:
   workflow_dispatch:
@@ -9,46 +9,60 @@ jobs:
     timeout-minutes: 350
 
     env:
-      MODEL: Qwen/Qwen3-8B
+      MODEL: google/gemma-4-E4B-it
       PORT: 8000
+      VLLM_CPU_KVCACHE_SPACE: 8
+      VLLM_CPU_NUM_OF_RESERVED_CPU: 1
 
     steps:
-      - name: Install
+      - name: Start vLLM CPU
         run: |
-          python3 -m pip install -U pip
-          pip install -U vllm
-          curl -L --fail -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/cloudflared
+          docker pull vllm/vllm-openai-cpu:latest-x86_64
 
-      - name: Start vLLM
-        run: |
-          export VLLM_CPU_NUM_OF_RESERVED_CPU=1
-          nohup vllm serve "$MODEL" \
+          docker run -d --name vllm \
+            --security-opt seccomp=unconfined \
+            --cap-add SYS_NICE \
+            --shm-size=4g \
+            -p $PORT:8000 \
+            -e VLLM_CPU_KVCACHE_SPACE=$VLLM_CPU_KVCACHE_SPACE \
+            -e VLLM_CPU_NUM_OF_RESERVED_CPU=$VLLM_CPU_NUM_OF_RESERVED_CPU \
+            -v ~/.cache/huggingface:/root/.cache/huggingface \
+            vllm/vllm-openai-cpu:latest-x86_64 \
+            $MODEL \
+            --dtype=bfloat16 \
             --host 0.0.0.0 \
-            --port "$PORT" \
-            --dtype bfloat16 \
+            --port 8000 \
             --max-model-len 8192 \
             --max-num-seqs 10 \
-            --max-num-batched-tokens 8192 \
-            > vllm.log 2>&1 &
-
-          echo $! > vllm.pid
+            --max-num-batched-tokens 8192
 
           for i in $(seq 1 120); do
             if curl -sf http://127.0.0.1:$PORT/health >/dev/null; then
               echo "vLLM READY"
               break
             fi
-            if ! kill -0 "$(cat vllm.pid)" 2>/dev/null; then
-              cat vllm.log
+
+            if ! docker ps --format '{{.Names}}' | grep -q '^vllm$'; then
+              docker logs vllm
               exit 1
             fi
+
             sleep 5
           done
 
           curl -sf http://127.0.0.1:$PORT/health
-          tail -n 50 vllm.log
+          echo
+          echo "================================"
+          echo "OpenAI API:"
+          echo "http://127.0.0.1:$PORT/v1/chat/completions"
+          echo "================================"
+          docker logs --tail 50 vllm
+
+      - name: Install Cloudflare
+        run: |
+          curl -L --fail -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
 
       - name: Start Tunnel
         run: |
@@ -58,11 +72,33 @@ jobs:
             [ -n "$URL" ] && break
             sleep 1
           done
+
           test -n "${URL:-}" || { cat tunnel.log; exit 1; }
+
           echo "================================"
           echo "BASE URL: $URL/v1"
-          echo "CHAT: $URL/v1/chat/completions"
+          echo "CHAT COMPLETIONS: $URL/v1/chat/completions"
           echo "================================"
 
+          curl -sf "$URL/v1/models" || true
+
+      - name: Test OpenAI endpoint
+        run: |
+          curl -sS http://127.0.0.1:$PORT/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "google/gemma-4-E4B-it",
+              "messages": [
+                {
+                  "role": "user",
+                  "content": "السلام عليكم، اكتب كلمة واحدة فقط: تمام"
+                }
+              ],
+              "max_tokens": 32,
+              "temperature": 0.2
+            }'
+
       - name: Keep Alive
-        run: sleep 19800
+        run: |
+          echo "vLLM is running..."
+          sleep 19800
