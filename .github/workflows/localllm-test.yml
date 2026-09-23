@@ -74,8 +74,8 @@ jobs:
           echo "=========================================="
           echo "تشغيل llama server"
           echo "=========================================="
-
-          MODEL="unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+          
+          MODEL="unsloth/gemma-4-E4B-it-GGUF"
 
           echo "الموديل:"
           echo "$MODEL"
