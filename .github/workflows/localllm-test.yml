@@ -1,11 +1,5 @@
+```yaml
 name: localllm-test
-
-# تشغيل يدوي بس (زرار "Run workflow" من تبويب Actions) — مش على كل push
-# ومش مجدول تلقائيًا، ومفيش تدوير بين ريبوهات. السبب: GitHub Actions
-# مصمم لبناء/اختبار/نشر الريبو نفسه، مش لاستضافة خدمة عامة دايمة — استخدامه
-# كبديل استضافة مستمر (خصوصًا بتدوير أكتر من ريبو لتفادي حد الـ 6 ساعات)
-# بيخالف شروط الاستخدام وبيعرّض الحساب كله للإيقاف. الملف ده لتشغيل/اختبار
-# مؤقت بس، تلغيه يدويًا لما تخلص.
 
 on:
   workflow_dispatch: {}
@@ -13,49 +7,366 @@ on:
 jobs:
   test-localllm:
     runs-on: ubuntu-latest
-    # ⚠️ الرامات بتختلف حسب نوع الريبو: عام (public) = 16GB رام (كافي
-    # براحة للموديل ده)، خاص (private) = 8GB بس (ضيق جدًا، ممكن يفشل
-    # بسبب الذاكرة). لو الريبو خاص وحصل فشل، جرب quant أصغر أو ريبو عام.
-    timeout-minutes: 350 # قريب من سقف الـ 6 ساعات (360) بهامش أمان
+
+    # أقل من الحد الأقصى لـ GitHub Actions
+    timeout-minutes: 350
 
     steps:
-      - name: تثبيت llama.cpp
+
+      # ============================================================
+      # 1) تثبيت llama.cpp / llama CLI
+      # ============================================================
+      - name: تثبيت llama
+        shell: bash
         run: |
+          set -e
+
+          echo "=========================================="
+          echo "تثبيت llama..."
+          echo "=========================================="
+
           curl -LsSf https://llama.app/install.sh | sh
+
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: تثبيت cloudflared
-        run: |
-          curl -Lo cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared
-          sudo mv cloudflared /usr/local/bin/
+          export PATH="$HOME/.local/bin:$PATH"
 
-      - name: تشغيل سيرفر الموديل في الخلفية
+          echo ""
+          echo "إصدار llama:"
+          llama --version || true
+
+      # ============================================================
+      # 2) تثبيت cloudflared
+      # ============================================================
+      - name: تثبيت cloudflared
+        shell: bash
         run: |
-          nohup llama serve -hf unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL \
-            --host 0.0.0.0 --port 8080 > llama.log 2>&1 &
-          echo "بانتظار جاهزية السيرفر (أول مرة بتنزّل الموديل، ممكن ياخد كذا دقيقة)..."
+          set -e
+
+          echo "=========================================="
+          echo "تثبيت cloudflared..."
+          echo "=========================================="
+
+          curl -L \
+            --fail \
+            --retry 5 \
+            --retry-delay 2 \
+            -o cloudflared \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+          chmod +x cloudflared
+
+          sudo mv cloudflared /usr/local/bin/cloudflared
+
+          echo ""
+          echo "إصدار cloudflared:"
+          cloudflared --version
+
+      # ============================================================
+      # 3) تشغيل llama server
+      # ============================================================
+      - name: تشغيل سيرفر الموديل
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          export PATH="$HOME/.local/bin:$PATH"
+
+          echo "=========================================="
+          echo "تشغيل llama server"
+          echo "=========================================="
+
+          MODEL="unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL"
+
+          echo "الموديل:"
+          echo "$MODEL"
+
+          echo ""
+          echo "بدء llama serve..."
+
+          # نحذف أي log قديم
+          rm -f llama.log
+
+          # تشغيل السيرفر في الخلفية
+          llama serve -hf "$MODEL" \
+            --host 0.0.0.0 \
+            --port 8080 \
+            > llama.log 2>&1 &
+
+          LLAMA_PID=$!
+
+          echo "PID الخاص بـ llama:"
+          echo "$LLAMA_PID"
+
+          echo "$LLAMA_PID" > llama.pid
+
+          echo ""
+          echo "=========================================="
+          echo "بانتظار جاهزية السيرفر..."
+          echo "=========================================="
+
+          READY=0
+
+          # 120 محاولة × 5 ثواني = 10 دقائق
           for i in $(seq 1 120); do
-            if curl -sf http://localhost:8080/health > /dev/null; then
-              echo "✅ السيرفر جاهز"
+
+            # هل العملية ما زالت موجودة؟
+            if ! kill -0 "$LLAMA_PID" 2>/dev/null; then
+              echo ""
+              echo "❌ llama serve توقف قبل أن يصبح جاهزًا."
+
+              echo ""
+              echo "=========================================="
+              echo "آخر llama.log"
+              echo "=========================================="
+
+              cat llama.log || true
+
+              exit 1
+            fi
+
+            # فحص health endpoint
+            if curl \
+              --silent \
+              --show-error \
+              --fail \
+              --max-time 5 \
+              http://127.0.0.1:8080/health \
+              > /dev/null 2>&1; then
+
+              echo ""
+              echo "✅ السيرفر أصبح جاهزًا."
+
+              READY=1
               break
             fi
+
+            echo "المحاولة $i/120 - السيرفر لسه بيجهز..."
+
+            # كل 10 محاولات اطبع آخر اللوج
+            if (( i % 10 == 0 )); then
+              echo ""
+              echo "----- آخر llama.log -----"
+              tail -n 30 llama.log || true
+              echo "-------------------------"
+            fi
+
             sleep 5
           done
-          tail -n 50 llama.log
 
-      - name: فتح نفق Cloudflare وطباعة الرابط
+          # ========================================================
+          # التأكد أن السيرفر أصبح جاهزًا فعلًا
+          # ========================================================
+          if [ "$READY" -ne 1 ]; then
+
+            echo ""
+            echo "❌ السيرفر لم يصبح جاهزًا خلال 10 دقائق."
+
+            echo ""
+            echo "=========================================="
+            echo "آخر llama.log"
+            echo "=========================================="
+
+            tail -n 200 llama.log || true
+
+            echo ""
+            echo "إيقاف llama..."
+
+            kill "$LLAMA_PID" 2>/dev/null || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "LLAMA SERVER READY"
+          echo "=========================================="
+
+          echo "PID: $LLAMA_PID"
+          echo "URL: http://127.0.0.1:8080"
+
+          echo ""
+          echo "Health:"
+          curl --fail http://127.0.0.1:8080/health
+
+          echo ""
+          echo ""
+          echo "آخر logs:"
+          tail -n 50 llama.log || true
+
+      # ============================================================
+      # 4) تشغيل Cloudflare Tunnel
+      # ============================================================
+      - name: فتح Cloudflare Tunnel
+        shell: bash
         run: |
-          ./cloudflared tunnel --no-autoupdate --url http://localhost:8080 > tunnel.log 2>&1 &
-          sleep 12
-          echo "=================================================="
-          echo "رابط الاختبار المؤقت:"
-          grep -o 'https://[a-zA-Z0-9.-]*trycloudflare\.com' tunnel.log || cat tunnel.log
-          echo "=================================================="
-          echo "⚠️ الرابط ده هيختفي فور ما الـ job ده يخلص أو يتلغي يدويًا."
+          set -Eeuo pipefail
 
+          echo "=========================================="
+          echo "تشغيل Cloudflare Tunnel"
+          echo "=========================================="
+
+          rm -f tunnel.log
+
+          cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:8080 \
+            > tunnel.log 2>&1 &
+
+          TUNNEL_PID=$!
+
+          echo "Tunnel PID:"
+          echo "$TUNNEL_PID"
+
+          echo "$TUNNEL_PID" > tunnel.pid
+
+          echo ""
+          echo "بانتظار رابط Cloudflare..."
+
+          TUNNEL_URL=""
+
+          # ننتظر حتى 60 ثانية
+          for i in $(seq 1 60); do
+
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo ""
+              echo "❌ cloudflared توقف."
+
+              echo ""
+              echo "=========================================="
+              echo "cloudflared log"
+              echo "=========================================="
+
+              cat tunnel.log || true
+
+              exit 1
+            fi
+
+            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
+
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+
+            sleep 1
+          done
+
+          echo ""
+          echo "=================================================="
+
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "✅ رابط الاختبار:"
+            echo ""
+            echo "$TUNNEL_URL"
+            echo ""
+            echo "=================================================="
+
+            # نخليه ظاهر في GitHub Actions كـ output
+            echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+
+          else
+            echo "❌ لم يتم الحصول على رابط Cloudflare."
+
+            echo ""
+            echo "=========================================="
+            echo "cloudflared log"
+            echo "=========================================="
+
+            cat tunnel.log || true
+
+            echo "=================================================="
+
+            exit 1
+          fi
+
+          echo ""
+          echo "Cloudflare Tunnel logs:"
+          tail -n 30 tunnel.log || true
+
+      # ============================================================
+      # 5) التأكد أن السيرفر + النفق ما زالوا شغالين
+      # ============================================================
+      - name: فحص السيرفر والنفق
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "=========================================="
+          echo "فحص نهائي"
+          echo "=========================================="
+
+          if [ ! -f llama.pid ]; then
+            echo "❌ llama.pid غير موجود."
+            exit 1
+          fi
+
+          LLAMA_PID=$(cat llama.pid)
+
+          if kill -0 "$LLAMA_PID" 2>/dev/null; then
+            echo "✅ llama server ما زال يعمل."
+          else
+            echo "❌ llama server توقف."
+
+            echo ""
+            echo "آخر logs:"
+            tail -n 200 llama.log || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "Health check:"
+
+          if curl \
+            --silent \
+            --show-error \
+            --fail \
+            --max-time 10 \
+            http://127.0.0.1:8080/health \
+            > /dev/null; then
+
+            echo "✅ localhost:8080 شغال."
+
+          else
+
+            echo "❌ localhost:8080 لا يستجيب."
+
+            tail -n 200 llama.log || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "كل شيء جاهز."
+          echo "=========================================="
+
+          echo ""
+          echo "الرابط:"
+          echo "${TUNNEL_URL:-غير معروف}"
+
+      # ============================================================
+      # 6) إبقاء الـ workflow شغال
+      # ============================================================
       - name: إبقاء الجلسة شغالة للاختبار اليدوي
+        shell: bash
         run: |
-          echo "الخادم شغال — اختبره دلوقتي بالرابط اللي طلع فوق."
-          echo "لغِ الـ job يدويًا من تبويب Actions لما تخلص اختبار."
-          sleep 20000 # ~5.5 ساعة — هامش قبل سقف timeout-minutes
+          set -Eeuo pipefail
+
+          echo "=========================================="
+          echo "الخادم شغال للاختبار"
+          echo "=========================================="
+
+          echo ""
+          echo "رابط Cloudflare:"
+          echo "${TUNNEL_URL:-غير معروف}"
+
+          echo ""
+          echo "يمكنك الآن اختبار الـ API."
+
+          echo ""
+          echo "سيظل الـ workflow شغالًا حتى يتم إلغاؤه أو انتهاء الـ timeout."
+
+          # حوالي 5.5 ساعات
+          sleep 19800
+```
