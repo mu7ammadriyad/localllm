@@ -1,0 +1,61 @@
+name: localllm-test
+
+# تشغيل يدوي بس (زرار "Run workflow" من تبويب Actions) — مش على كل push
+# ومش مجدول تلقائيًا، ومفيش تدوير بين ريبوهات. السبب: GitHub Actions
+# مصمم لبناء/اختبار/نشر الريبو نفسه، مش لاستضافة خدمة عامة دايمة — استخدامه
+# كبديل استضافة مستمر (خصوصًا بتدوير أكتر من ريبو لتفادي حد الـ 6 ساعات)
+# بيخالف شروط الاستخدام وبيعرّض الحساب كله للإيقاف. الملف ده لتشغيل/اختبار
+# مؤقت بس، تلغيه يدويًا لما تخلص.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  test-localllm:
+    runs-on: ubuntu-latest
+    # ⚠️ الرامات بتختلف حسب نوع الريبو: عام (public) = 16GB رام (كافي
+    # براحة للموديل ده)، خاص (private) = 8GB بس (ضيق جدًا، ممكن يفشل
+    # بسبب الذاكرة). لو الريبو خاص وحصل فشل، جرب quant أصغر أو ريبو عام.
+    timeout-minutes: 350 # قريب من سقف الـ 6 ساعات (360) بهامش أمان
+
+    steps:
+      - name: تثبيت llama.cpp
+        run: |
+          curl -LsSf https://llama.app/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: تثبيت cloudflared
+        run: |
+          curl -Lo cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: تشغيل سيرفر الموديل في الخلفية
+        run: |
+          nohup llama serve -hf unsloth/gemma-4-12b-it-GGUF:UD-Q4_K_XL \
+            --host 0.0.0.0 --port 8080 > llama.log 2>&1 &
+          echo "بانتظار جاهزية السيرفر (أول مرة بتنزّل الموديل، ممكن ياخد كذا دقيقة)..."
+          for i in $(seq 1 120); do
+            if curl -sf http://localhost:8080/health > /dev/null; then
+              echo "✅ السيرفر جاهز"
+              break
+            fi
+            sleep 5
+          done
+          tail -n 50 llama.log
+
+      - name: فتح نفق Cloudflare وطباعة الرابط
+        run: |
+          ./cloudflared tunnel --no-autoupdate --url http://localhost:8080 > tunnel.log 2>&1 &
+          sleep 12
+          echo "=================================================="
+          echo "رابط الاختبار المؤقت:"
+          grep -o 'https://[a-zA-Z0-9.-]*trycloudflare\.com' tunnel.log || cat tunnel.log
+          echo "=================================================="
+          echo "⚠️ الرابط ده هيختفي فور ما الـ job ده يخلص أو يتلغي يدويًا."
+
+      - name: إبقاء الجلسة شغالة للاختبار اليدوي
+        run: |
+          echo "الخادم شغال — اختبره دلوقتي بالرابط اللي طلع فوق."
+          echo "لغِ الـ job يدويًا من تبويب Actions لما تخلص اختبار."
+          sleep 20000 # ~5.5 ساعة — هامش قبل سقف timeout-minutes
