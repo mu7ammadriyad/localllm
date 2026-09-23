@@ -1,4 +1,4 @@
-name: gemma-vllm
+name: qwen-vllm
 
 on:
   workflow_dispatch:
@@ -9,96 +9,74 @@ jobs:
     timeout-minutes: 350
 
     env:
-      MODEL: google/gemma-4-E4B-it
+      MODEL: Qwen/Qwen3-1.7B
       PORT: 8000
-      VLLM_CPU_KVCACHE_SPACE: 8
+      VLLM_CPU_KVCACHE_SPACE: 3
       VLLM_CPU_NUM_OF_RESERVED_CPU: 1
 
     steps:
-      - name: Start vLLM CPU
+      - name: تشغيل vLLM
         run: |
           docker pull vllm/vllm-openai-cpu:latest-x86_64
-
-          docker run -d --name vllm \
-            --security-opt seccomp=unconfined \
-            --cap-add SYS_NICE \
-            --shm-size=4g \
-            -p $PORT:8000 \
-            -e VLLM_CPU_KVCACHE_SPACE=$VLLM_CPU_KVCACHE_SPACE \
-            -e VLLM_CPU_NUM_OF_RESERVED_CPU=$VLLM_CPU_NUM_OF_RESERVED_CPU \
-            -v ~/.cache/huggingface:/root/.cache/huggingface \
-            vllm/vllm-openai-cpu:latest-x86_64 \
-            $MODEL \
-            --dtype=bfloat16 \
-            --host 0.0.0.0 \
-            --port 8000 \
-            --max-model-len 8192 \
-            --max-num-seqs 10 \
-            --max-num-batched-tokens 8192
+          docker run -d --name vllm --security-opt seccomp=unconfined --cap-add SYS_NICE --shm-size=4g -p $PORT:8000 -e VLLM_CPU_KVCACHE_SPACE=$VLLM_CPU_KVCACHE_SPACE -e VLLM_CPU_NUM_OF_RESERVED_CPU=$VLLM_CPU_NUM_OF_RESERVED_CPU -v ~/.cache/huggingface:/root/.cache/huggingface vllm/vllm-openai-cpu:latest-x86_64 $MODEL --dtype bfloat16 --host 0.0.0.0 --port 8000 --max-model-len 4096 --max-num-seqs 10 --max-num-batched-tokens 4096
 
           for i in $(seq 1 120); do
             if curl -sf http://127.0.0.1:$PORT/health >/dev/null; then
-              echo "vLLM READY"
+              echo "✅ vLLM READY"
               break
             fi
-
             if ! docker ps --format '{{.Names}}' | grep -q '^vllm$'; then
+              echo "❌ vLLM توقف"
               docker logs vllm
               exit 1
             fi
-
             sleep 5
           done
 
           curl -sf http://127.0.0.1:$PORT/health
           echo
-          echo "================================"
-          echo "OpenAI API:"
-          echo "http://127.0.0.1:$PORT/v1/chat/completions"
-          echo "================================"
-          docker logs --tail 50 vllm
+          echo "✅ OpenAI endpoint: http://127.0.0.1:$PORT/v1/chat/completions"
+          docker logs --tail 40 vllm
 
-      - name: Install Cloudflare
+      - name: تثبيت Cloudflare Tunnel
         run: |
           curl -L --fail -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/cloudflared
 
-      - name: Start Tunnel
+      - name: فتح النفق
         run: |
           nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:$PORT > tunnel.log 2>&1 &
+
           for i in $(seq 1 60); do
             URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)
             [ -n "$URL" ] && break
             sleep 1
           done
 
-          test -n "${URL:-}" || { cat tunnel.log; exit 1; }
+          if [ -z "${URL:-}" ]; then
+            cat tunnel.log
+            exit 1
+          fi
 
-          echo "================================"
-          echo "BASE URL: $URL/v1"
-          echo "CHAT COMPLETIONS: $URL/v1/chat/completions"
-          echo "================================"
+          echo "=========================================="
+          echo "✅ BASE URL:"
+          echo "$URL/v1"
+          echo
+          echo "✅ CHAT COMPLETIONS:"
+          echo "$URL/v1/chat/completions"
+          echo
+          echo "✅ MODELS:"
+          echo "$URL/v1/models"
+          echo "=========================================="
 
-          curl -sf "$URL/v1/models" || true
-
-      - name: Test OpenAI endpoint
+      - name: اختبار OpenAI API
         run: |
           curl -sS http://127.0.0.1:$PORT/v1/chat/completions \
             -H "Content-Type: application/json" \
-            -d '{
-              "model": "google/gemma-4-E4B-it",
-              "messages": [
-                {
-                  "role": "user",
-                  "content": "السلام عليكم، اكتب كلمة واحدة فقط: تمام"
-                }
-              ],
-              "max_tokens": 32,
-              "temperature": 0.2
-            }'
+            -d '{"model":"Qwen/Qwen3-1.7B","messages":[{"role":"user","content":"السلام عليكم، اكتب كلمة تمام فقط"}],"max_tokens":32,"temperature":0.2}'
 
-      - name: Keep Alive
+      - name: إبقاء السيرفر شغال
         run: |
-          echo "vLLM is running..."
+          echo "✅ السيرفر شغال"
           sleep 19800
